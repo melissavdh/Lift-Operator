@@ -1,0 +1,613 @@
+--go.up/go.down : if coll.going[cf] and coll.up/down[cf] for same cf merge into one function?
+
+--SORT TIMING!!!!
+--write in if lift at 0, called to go to floor 0: "already at ground floor"
+--down: if floor 2 calls to go down, then floor 4, go to floor 4 first and pick 2 up on the way down
+--if no colls at all, set idle = true
+
+------------------
+------TO DO-------
+--sort timings
+--then can test going? channel -YIKES
+--finish off go.down
+--proper termination of system
+------------------
+
+
+#INCLUDE "consts.inc"
+#USE "course.lib"
+
+VAL levels IS 5 :
+VAL INT doorsopen IS 60 : --slow down?? val x = whatever, multiply by y
+VAL INT doorsclose IS  60 :
+VAL INT doorswait IS 60 :
+VAL INT motorup IS  60 :
+VAL INT motordown IS 60 :
+VAL INT motorstop IS 60 :
+VAL INT time IS 9876543 :
+
+PROTOCOL FLOOR.REQUEST 
+  CASE
+    up; INT 
+    down; INT 
+:
+
+PROTOCOL FLOOR.ACKNOWLEDGE
+  CASE
+    up; INT; BOOL 
+    down; INT; BOOL 
+:
+
+PROTOCOL LIFT.GO IS INT :
+
+PROTOCOL LIFT.GOING IS INT; BOOL :
+
+PROTOCOL LIFT.MOTOR
+  CASE
+    up
+    down
+    stop
+:
+
+PROTOCOL DOORS
+  CASE
+    open
+    close
+:
+
+-----------------------------------------------------------------
+
+PROC delay (VAL INT period) -- copied from example program buffer.occ
+  VAL one.sec IS 15625 :
+  TIMER clock :
+  INT now :
+  SEQ
+    clock ? now
+    clock ? AFTER now PLUS (period * one.sec)
+:
+
+-----------------------------------------------------------------
+
+PROC keyb.harness([] CHAN OF FLOOR.REQUEST request, CHAN OF BYTE kyb, CHAN OF LIFT.GO go)
+  BYTE char :
+  INITIAL BOOL running IS TRUE :
+  SEQ
+    WHILE TRUE        -- ideally should quit if q is pressed...
+      SEQ
+        kyb ? char
+        IF
+          char = '0'
+            request[0] ! up ; '0' -- request lift from floor 0 to go up
+          char = '1'
+            request[1] ! up ; '1'
+          char = '2'
+            request[2] ! up ; '2'
+          char = '3'
+            request[3] ! up ; '3'
+          char = '4'
+            request[1] ! down ; '1' --request lift from floor 1 to go down
+          char = '5'
+            request[2] ! down ; '2'
+          char = '6'
+            request[3] ! down ; '3'
+          char = '7'
+            request[4] ! down ; '4'
+          char = 'a'
+            go ! 0 -- once in lift, go to floor 0
+          char =  'b'
+            go ! 1
+          char = 'c'
+            go ! 2
+          char = 'd'
+            go ! 3
+          char = 'e'
+            go ! 4
+          char = 'q'   -- SKIP? Instead send signal to initiate proper termination of the system
+            PAR
+              --motor ! stop
+              running := FALSE
+          TRUE   
+            SKIP
+:
+
+-----------------------------------------------------------------
+
+PROC display (CHAN OF BYTE scr, []CHAN OF BYTE to.scrn) --copied from example program buffer.occ and edited to suit
+  BYTE string :
+  INITIAL BOOL running IS TRUE :
+
+  WHILE running
+    ALT i=0 FOR SIZE to.scrn 
+      to.scrn[i] ? string
+        SEQ
+          scr ! string
+          scr ! FLUSH
+:
+
+-----------------------------------------------------------------
+
+PROC requests ([levels]CHAN OF FLOOR.REQUEST request, [levels]CHAN OF FLOOR.ACKNOWLEDGE acknowledge, CHAN OF BYTE stringout)
+  INT to.floor :
+  INITIAL BOOL running IS TRUE :
+
+  WHILE running
+    PRI ALT i = 0 FOR levels
+      request[i] ? CASE
+        up ; to.floor
+          SEQ
+            out.string("Indicator on. Lift requested to go up from floor ", 0, stringout)
+            out.int(i, 0, stringout)
+            out.string("*n", 0, stringout)
+            acknowledge[i] ! up ; to.floor ; TRUE
+        down; to.floor
+          SEQ
+            out.string("*nIndicator on. Lift requested to go down from floor ", 0, stringout)
+            out.int(i, 0, stringout)
+            out.string("*n", 0, stringout)
+            acknowledge[i] ! down ; to.floor ; TRUE
+:
+
+-----------------------------------------------------------------
+
+PROC request.indicator (CHAN OF LIFT.GOING going, CHAN OF LIFT.GO go, CHAN OF BYTE stringout)
+  INITIAL INT to.floor IS 0 :
+  INITIAL BOOL running IS TRUE :
+
+  WHILE running
+    ALT
+      go ? to.floor
+        SEQ
+          going ! to.floor ; TRUE
+          out.string("*nIndicator on. Lift going to floor ", 0, stringout)
+          out.int(to.floor, 0, stringout)
+          out.string("*n", 0, stringout)
+:
+
+-----------------------------------------------------------------
+
+PROC doorcontrol ([] CHAN OF DOORS doors, CHAN OF BYTE stringout)
+  INITIAL BOOL running IS TRUE :
+
+  WHILE running
+    ALT i=0 FOR SIZE doors
+      doors[i] ? CASE
+        open
+          SEQ
+            out.string("Doors opening on floor ", 0, stringout)
+            out.int(i, 0, stringout)
+            out.string("*n", 0, stringout)
+        close
+          SEQ
+            out.string("Doors closing on floor ", 0, stringout)
+            out.int(i, 0, stringout)
+            out.string("*n", 0, stringout)
+:
+
+-----------------------------------------------------------------
+
+PROC motorcontrol (CHAN OF LIFT.MOTOR motor, CHAN OF BYTE stringout)
+  INITIAL BOOL running IS TRUE :
+
+  WHILE running
+    motor ? CASE
+      up
+        SEQ
+          out.string("Lift going up*n", 0, stringout)
+          delay(motorup)
+      down
+        SEQ
+          out.string("Lift going down*n", 0, stringout)
+          delay(motordown)
+      stop
+        SEQ
+          out.string("Lift stopping", 0, stringout)
+          delay(motorstop)
+:
+
+-----------------------------------------------------------------
+
+PROC liftcontrol ([levels]CHAN OF FLOOR.ACKNOWLEDGE acknowledge, CHAN OF LIFT.GOING going, CHAN OF LIFT.MOTOR motor, CHAN OF BYTE stringout, [levels]CHAN OF DOORS doors)
+
+  [levels] BOOL coll.ups :
+  [levels] BOOL coll.downs :
+  [levels] BOOL coll.going :
+  INITIAL INT to.floor IS 0 :
+  BOOL ackbool :
+  INITIAL BOOL go.up IS FALSE :
+  INITIAL BOOL go.down IS FALSE :
+  BOOL goingbool :
+  TIMER clock :
+  INT start.timing :
+  INITIAL BOOL lift.button IS FALSE :
+  INITIAL BOOL idle IS TRUE :
+  INITIAL INT current.floor IS 0 :
+  INITIAL BOOL running IS TRUE :
+  INITIAL INT upqueue IS 0 :
+  INITIAL INT floorupqueue IS 0 :
+  INITIAL BOOL go.down2 IS FALSE :
+
+  SEQ
+    SEQ i=0 FOR levels
+      coll.going[i]:=FALSE
+    SEQ i=0 FOR levels
+      coll.ups[i]:=FALSE
+    SEQ i=0 FOR levels
+      coll.downs[i]:=FALSE
+    idle:=TRUE
+
+--if lift is idle, go to floor 0
+    WHILE running
+
+      SEQ
+
+      	SEQ i=0 FOR levels
+          IF 
+            ((coll.ups[i]=FALSE)AND(coll.downs[i]=FALSE)AND(coll.going[i]=FALSE))
+              idle := TRUE
+            TRUE
+              idle := FALSE
+
+        IF
+          idle
+            IF
+              (go.down=FALSE) AND (go.up=FALSE)
+                SEQ
+                  out.string("Lift is idle*n", 0, stringout)
+                  IF
+                    current.floor<0
+                      current.floor:=0
+                    current.floor = 0
+                      SEQ
+                        out.string("Lift idle at floor 0*n", 0, stringout)
+                        idle:=FALSE
+--                    current.floor>0
+--                      SEQ
+--                        out.string("Lift idle, returning to floor 0*n", 0, stringout)
+--                        WHILE current.floor>0
+--                          SEQ
+--                            motor ! down
+--                            current.floor := current.floor - 1
+--                            out.string("Lift at floor ", 0, stringout)
+--                            out.int(current.floor, 0, stringout)
+--                            out.string("*n", 0, stringout)
+                    TRUE
+                      SKIP
+              TRUE
+                SKIP
+          TRUE
+            SKIP
+    
+--if requests come in
+--set idle to false
+----if request to go up
+------set go.up = true
+------add floor to coll.ups
+----if request to go down
+------set go.down to true
+------add floor to coll.downs
+----read going? floor to coll.going
+
+        ALT i=0 FOR SIZE acknowledge --SEQ??
+          PRI ALT
+            acknowledge[i] ? CASE
+              up; to.floor; ackbool
+                SEQ
+                  idle := FALSE
+                  go.up := TRUE
+                  coll.ups[i] := TRUE
+                  floorupqueue:=floorupqueue+1
+              down; to.floor; ackbool
+                SEQ
+                  idle := FALSE
+                  go.down := TRUE
+                  coll.downs[i] := TRUE
+            going ? to.floor; goingbool
+              SEQ
+                idle := FALSE
+                coll.going[to.floor] := TRUE
+                out.string("New request from lift button to go to floor ", 0, stringout)
+                out.int(to.floor, 0, stringout)
+                out.string("*n", 0, stringout)
+
+--decide here up or down? if floor.to<current.floor.....down
+
+--if go.up
+----set idle to false (?)
+------if coll.going[cf] is true
+--------doors open
+--------doors close -----only if another request somewhere else?
+--------indicator off for cf - request serviced
+------if coll.ups[cf] is true
+--------open doors
+--------wait for button press
+--------read floor button pressed into coll.going
+--------close doors
+--------coll.ups[cf] = false (?)
+--------motor up
+--------cf = cf + 1 UNLESS ON 4TH FLOOR
+--------coll.ups[cf] = false(?)
+
+        WHILE go.up
+          SEQ
+            idle:=FALSE
+            IF
+              coll.ups[current.floor] --what about if lift is already at the right floor? eg when idle. then press 0. 
+                SEQ
+                  floorupqueue:=floorupqueue-1
+                  out.string("*nLift at floor ", 0, stringout)
+                  out.int(current.floor, 0, stringout)
+                  out.string("*n", 0, stringout)
+                  doors[current.floor] ! open
+                  delay(doorsopen)
+                  out.string("Press floor button in lift*n", 0, stringout)
+                  clock ? start.timing
+                  WHILE lift.button=FALSE
+                    PRI ALT
+                      going ? to.floor; goingbool
+                        SEQ
+                          IF
+                            to.floor = current.floor
+                              SEQ
+                                --out.string("Lift already at floor ", 0, stringout)
+                                --out.int(current.floor, 0, stringout)
+                                --out.string("*n", 0, stringout)
+                                lift.button:=TRUE
+                            TRUE
+                              SKIP
+                          IF
+                            to.floor<current.floor
+                              SEQ
+                                coll.going[to.floor]:=TRUE
+                                go.down:=TRUE
+                                go.up:=FALSE
+                                lift.button:=TRUE
+                            TRUE
+                              SKIP
+                          IF
+                            to.floor>current.floor
+                              SEQ
+                                upqueue:=upqueue+1
+                                coll.going[to.floor]:=TRUE
+                                go.up:=FALSE
+                                go.down:=FALSE
+                                go.up:=TRUE
+                                lift.button:=TRUE
+                            TRUE
+                              SKIP
+                      clock ? AFTER start.timing + time
+                        SEQ
+                          out.string("No response from inside lift. Continuing to service other requests*n", 0, stringout)
+                          lift.button:=TRUE
+                  lift.button:=FALSE
+                  doors[current.floor] ! close
+                  delay(doorsclose)
+                  coll.ups[current.floor]:=FALSE
+              coll.going[current.floor]
+                SEQ
+                  upqueue:=upqueue-1
+                  out.string("*nLift at floor ", 0, stringout)
+                  out.int(current.floor, 0, stringout)
+                  out.string("*n", 0, stringout)
+                  doors[current.floor] ! open
+                  delay(doorsopen)
+                  out.string("Wait for people to get out...*n", 0, stringout)
+                  delay(doorswait)
+                  out.string("Indicator off: request to go to floor ", 0, stringout)
+                  out.int(current.floor, 0, stringout)
+                  out.string(" has been serviced*n", 0, stringout)
+                  doors[current.floor] ! close
+                  delay(doorsclose)
+                  coll.going[current.floor]:=FALSE
+              go.up
+                IF                  
+                  current.floor<>4 --only if floors left to be serviced!
+                    SEQ
+                      go.up:=TRUE
+                      motor ! up
+                      current.floor := current.floor+1
+                      out.string("*nLift at floor ", 0, stringout)
+                      out.int(current.floor, 0, stringout)
+                      out.string("*n", 0, stringout)
+                      go.up:=TRUE
+                  current.floor=4
+                    SEQ
+                      out.string("Lift already at top floor*n!", 0, stringout)
+                      go.up:=FALSE
+                      go.down:=TRUE
+                  TRUE
+                    idle:=TRUE
+              TRUE
+                SKIP
+              TRUE
+                SKIP
+
+
+--if go.down
+----set idle to false(?)
+------if coll.going[cf] is true
+--------open doors
+--------close doors
+--------indicator off - request for this floor serviced
+------if coll.downs[cf] is true
+--------open doors
+--------wait for button press
+--------read floor button pressed into coll.going
+--------close doors
+--------coll.downs[cf] = false (?)
+--------motor down
+--------cf = cf - 1
+--------coll.downs[cf] = false(?)
+
+
+---if request to go down from floor 4
+
+        WHILE go.down
+          SEQ
+            idle:=FALSE
+            out.string("*nLift at floor ", 0, stringout)
+            out.int(current.floor, 0, stringout)
+            out.string("*n", 0, stringout)
+            IF
+       --       coll.going[current.floor]
+         --       SEQ
+           --       doors[current.floor] ! open
+             --     delay(doorsopen)
+       --           out.string("Wait for people to get out...*n", 0, stringout)
+         --         delay(doorswait)
+           --       doors[current.floor] ! close
+             --     delay(doorsclose)
+       --           out.string("Indicator off: request to go to floor ", 0, stringout)
+         --         out.int(current.floor, 0, stringout)
+           --       out.string(" has been serviced*n", 0, stringout)--
+            --      coll.going[current.floor]:=FALSE
+              coll.downs[current.floor]
+                SEQ
+                  doors[current.floor] ! open
+                  delay(doorsopen)
+                  out.string("*nPress floor button in lift*n", 0, stringout)
+                  clock ? start.timing
+                  WHILE lift.button=FALSE
+                    PRI ALT
+                      going ? to.floor; goingbool
+                        SEQ
+                          IF
+                            to.floor = current.floor
+                              SEQ
+                                --out.string("Lift already at floor ", 0, stringout)
+                                --out.int(current.floor, 0, stringout)
+                                --out.string("*n", 0, stringout)
+                                lift.button:=TRUE
+                            TRUE
+                              SKIP
+                          IF
+                            to.floor>current.floor
+                              SEQ
+                                coll.going[to.floor]:=TRUE
+                                go.up:=TRUE
+                                go.down:=FALSE
+                                go.down2:=FALSE
+                                lift.button:=TRUE
+                            TRUE
+                              SKIP
+                          IF
+                            to.floor<current.floor
+                              SEQ
+                                go.down:=TRUE
+                                coll.going[to.floor]:=TRUE
+                                go.down:=TRUE
+                                go.up:=FALSE
+                                go.down2:=TRUE
+                                lift.button:=TRUE
+                            TRUE
+                              SKIP
+                      clock ? AFTER start.timing + time
+                        SEQ
+                          out.string("*nNo response from inside lift. Continuing to service other requests*n", 0, stringout)
+                          lift.button:=TRUE
+                  lift.button:=FALSE
+                  go.down:=TRUE
+                  doors[current.floor] ! close
+                  delay(doorsclose)
+                  coll.downs[current.floor]:=FALSE
+                  SEQ i=0 FOR levels
+                    IF 
+                      (coll.downs[i]=FALSE)
+                        SEQ j=current.floor FOR (levels-current.floor)
+                          IF 
+                            (coll.going[i]=FALSE)
+                              go.down := FALSE
+                            TRUE
+                              SKIP
+                      TRUE
+                        SKIP
+              coll.going[current.floor]
+                SEQ
+                  doors[current.floor] ! open
+                  delay(doorsopen)
+                  out.string("*nWait for people to get out...*n", 0, stringout)
+                  delay(doorswait)
+                  out.string("*nIndicator off: request to go to floor ", 0, stringout)
+                  out.int(current.floor, 0, stringout)
+                  out.string(" has been serviced*n", 0, stringout)
+                  doors[current.floor] ! close
+                  delay(doorsclose)
+                  coll.going[current.floor]:=FALSE
+              IF
+                coll.downs[4]
+                  WHILE current.floor<4
+                    SEQ
+                      motor ! up
+                      current.floor:=current.floor+1
+                      out.string("*nLift at floor ", 0, stringout)
+                      out.int(current.floor, 0, stringout)
+                      out.string("*n", 0, stringout)
+                coll.downs[3]
+                  WHILE current.floor<3
+                    SEQ
+                      motor ! up
+                      current.floor:=current.floor+1
+                      out.string("*nLift at floor ", 0, stringout)
+                      out.int(current.floor, 0, stringout)
+                      out.string("*n", 0, stringout)
+                coll.downs[2]
+                  WHILE current.floor<2
+                    SEQ
+                      motor ! up
+                      current.floor:=current.floor+1
+                      out.string("*nLift at floor ", 0, stringout)
+                      out.int(current.floor, 0, stringout)
+                      out.string("*n", 0, stringout)
+                coll.downs[1]
+                  WHILE current.floor<1
+                    SEQ
+                      motor ! up
+                      current.floor:=current.floor+1
+                      out.string("*nLift at floor ", 0, stringout)
+                      out.int(current.floor, 0, stringout)
+                      out.string("*n", 0, stringout)
+                coll.downs[0]
+                  out.string("*nLift already at ground floor.*n", 0, stringout)
+              go.down
+                IF                  
+                  current.floor<>0 --only if floors left to be serviced!
+                    SEQ
+                      go.down:=TRUE
+                      motor ! down
+                      current.floor := current.floor-1
+                      out.string("*nLift at floor ", 0, stringout)
+                      out.int(current.floor, 0, stringout)
+                      out.string("*n", 0, stringout)
+                      go.down:=TRUE
+                  current.floor=0
+                    SEQ
+                      out.string("Lift already at ground floor*n!", 0, stringout)
+                      go.down:=FALSE
+                      go.up:=TRUE
+                  TRUE
+                    idle:=TRUE
+              TRUE
+                SKIP
+              TRUE
+                SKIP
+:
+
+-----------------------------------------------------------------
+
+PROC main (CHAN OF BYTE kyb, scr)
+  [levels] CHAN OF FLOOR.REQUEST request :
+  [levels] CHAN OF FLOOR.ACKNOWLEDGE acknowledge :
+  [levels] CHAN OF DOORS doors:
+  CHAN OF LIFT.GO go :
+  CHAN OF LIFT.GOING going :
+  [5]CHAN OF BYTE to.scrn :
+  CHAN OF LIFT.MOTOR motor :
+
+  PAR
+    keyb.harness (request, kyb, go)
+    display (scr, to.scrn)
+    doorcontrol (doors, to.scrn[0])
+    motorcontrol (motor, to.scrn[1])
+    requests (request, acknowledge, to.scrn[2])
+    request.indicator (going, go, to.scrn[3])
+    liftcontrol (acknowledge, going, motor, to.scrn[4], doors)
+:
